@@ -1,21 +1,62 @@
 from .console import create_console_router
 from .fastapi_admin import create_provider_router
 from .gateway import GatewayResult, complete, model_candidates, protocol_candidates, stream_chat
-from .store import DEFAULT_PROTOCOLS, ProviderStore, mask_key, normalize_base_url
+from .multimodal import (
+    TASK_AUDIO,
+    TASK_AUTO,
+    TASK_IMAGE,
+    TASK_TEXT,
+    TASK_VISION,
+    CapabilityResult,
+    MediaResult,
+    build_chat_messages,
+    detect_task,
+    infer_audio_protocol,
+    route_audio,
+    route_capability,
+    route_image_generation,
+    route_text_or_vision,
+)
+from .store import (
+    DEFAULT_PROTOCOLS,
+    ProviderStore,
+    audio_model_candidates,
+    image_model_candidates,
+    mask_key,
+    normalize_base_url,
+    text_model_candidates,
+)
 from .testing import discover_models, probe_provider
 
 __all__ = [
     "DEFAULT_PROTOCOLS",
     "GatewayResult",
     "ProviderStore",
+    "CapabilityResult",
+    "MediaResult",
+    "TASK_AUTO",
+    "TASK_TEXT",
+    "TASK_VISION",
+    "TASK_IMAGE",
+    "TASK_AUDIO",
+    "audio_model_candidates",
+    "build_chat_messages",
     "complete",
     "create_console_router",
     "create_provider_router",
+    "detect_task",
     "discover_models",
+    "image_model_candidates",
+    "infer_audio_protocol",
     "mask_key",
     "model_candidates",
     "normalize_base_url",
     "probe_provider",
     "protocol_candidates",
+    "route_audio",
+    "route_capability",
+    "route_image_generation",
+    "route_text_or_vision",
     "stream_chat",
+    "text_model_candidates",
 ]
