@@ -272,7 +272,7 @@ class ProviderStore:
                     str(values.get("main_vision_model", existing["main_vision_model"])).strip(), _json(backup_vision),
                     _json(protocols), max(5, min(600, int(values.get("timeout_seconds", existing["timeout_seconds"])))),
                     1 if values.get("auto_test_enabled", existing["auto_test_enabled"]) else 0,
-                    max(1, min(720, int(values.get("auto_test_interval_hours", existing["auto_test_interval_hours"]))),
+                    max(1, min(720, int(values.get("auto_test_interval_hours", existing["auto_test_interval_hours"])))),
                     now, provider_id,
                 ),
             )
