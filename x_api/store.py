@@ -11,6 +11,8 @@ from typing import Any, Iterable, Iterator
 from cryptography.fernet import Fernet, InvalidToken
 
 DEFAULT_PROTOCOLS = ["chat", "responses", "legacy"]
+AUDIO_PROTOCOLS = {"auto", "chat_audio", "speech"}
+AUDIO_FORMATS = {"mp3", "opus", "aac", "flac", "wav", "pcm"}
 
 
 def utc_now() -> str:
@@ -23,7 +25,13 @@ def normalize_base_url(value: str) -> str:
         return ""
     if not value.startswith(("http://", "https://")):
         value = "https://" + value
-    for suffix in ("/chat/completions", "/responses", "/completions"):
+    for suffix in (
+        "/chat/completions",
+        "/images/generations",
+        "/audio/speech",
+        "/responses",
+        "/completions",
+    ):
         if value.lower().endswith(suffix):
             value = value[: -len(suffix)].rstrip("/")
             break
@@ -50,12 +58,38 @@ def _parse(value: str | None, default: Any) -> Any:
         return default
 
 
-class ProviderStore:
-    """SQLite provider store with a separate Fernet key file.
+def _normalize_audio_protocol(value: Any) -> str:
+    protocol = str(value or "auto").strip().lower()
+    return protocol if protocol in AUDIO_PROTOCOLS else "auto"
 
-    The database contains only encrypted API keys. The key file must be backed up
-    together with the database; losing it makes stored API keys unrecoverable.
-    """
+
+def _normalize_audio_format(value: Any) -> str:
+    audio_format = str(value or "wav").strip().lower()
+    return audio_format if audio_format in AUDIO_FORMATS else "wav"
+
+
+def _dedupe(values: Iterable[Any]) -> list[str]:
+    return list(dict.fromkeys(str(x).strip() for x in values if str(x).strip()))
+
+
+def text_model_candidates(provider: dict[str, Any], *, vision: bool = False) -> list[str]:
+    if vision:
+        override = _dedupe([provider.get("main_vision_model", ""), *(provider.get("backup_vision_models") or [])])
+        if override:
+            return override
+    return _dedupe([provider.get("main_text_model", ""), *(provider.get("backup_text_models") or [])])
+
+
+def image_model_candidates(provider: dict[str, Any]) -> list[str]:
+    return _dedupe([provider.get("main_image_model", ""), *(provider.get("backup_image_models") or [])])
+
+
+def audio_model_candidates(provider: dict[str, Any]) -> list[str]:
+    return _dedupe([provider.get("main_audio_model", ""), *(provider.get("backup_audio_models") or [])])
+
+
+class ProviderStore:
+    """SQLite provider store with encrypted upstream credentials and capability pools."""
 
     def __init__(self, db_path: str | Path, key_path: str | Path | None = None):
         self.db_path = Path(db_path).resolve()
@@ -83,6 +117,13 @@ class ProviderStore:
                     backup_text_models_json TEXT NOT NULL DEFAULT '[]',
                     main_vision_model TEXT NOT NULL DEFAULT '',
                     backup_vision_models_json TEXT NOT NULL DEFAULT '[]',
+                    main_image_model TEXT NOT NULL DEFAULT '',
+                    backup_image_models_json TEXT NOT NULL DEFAULT '[]',
+                    main_audio_model TEXT NOT NULL DEFAULT '',
+                    backup_audio_models_json TEXT NOT NULL DEFAULT '[]',
+                    audio_protocol TEXT NOT NULL DEFAULT 'auto',
+                    audio_voice TEXT NOT NULL DEFAULT 'alloy',
+                    audio_format TEXT NOT NULL DEFAULT 'wav',
                     protocol_order_json TEXT NOT NULL DEFAULT '["chat","responses","legacy"]',
                     model_capabilities_json TEXT NOT NULL DEFAULT '{}',
                     timeout_seconds INTEGER NOT NULL DEFAULT 60,
@@ -98,10 +139,27 @@ class ProviderStore:
                   ON providers(enabled, priority, id);
                 """
             )
+            self._ensure_multimodal_columns(conn)
         try:
             os.chmod(self.db_path, 0o600)
         except OSError:
             pass
+
+    @staticmethod
+    def _ensure_multimodal_columns(conn: sqlite3.Connection) -> None:
+        existing = {str(row[1]) for row in conn.execute("PRAGMA table_info(providers)").fetchall()}
+        additions = {
+            "main_image_model": "TEXT NOT NULL DEFAULT ''",
+            "backup_image_models_json": "TEXT NOT NULL DEFAULT '[]'",
+            "main_audio_model": "TEXT NOT NULL DEFAULT ''",
+            "backup_audio_models_json": "TEXT NOT NULL DEFAULT '[]'",
+            "audio_protocol": "TEXT NOT NULL DEFAULT 'auto'",
+            "audio_voice": "TEXT NOT NULL DEFAULT 'alloy'",
+            "audio_format": "TEXT NOT NULL DEFAULT 'wav'",
+        }
+        for column, ddl in additions.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE providers ADD COLUMN {column} {ddl}")
 
     def _load_or_create_key(self) -> Fernet:
         if self._fernet is not None:
@@ -152,14 +210,28 @@ class ProviderStore:
         finally:
             conn.close()
 
+    @staticmethod
+    def _models(values: Iterable[str] | None) -> list[str]:
+        return _dedupe(values or [])
+
+    @staticmethod
+    def _protocols(values: Iterable[str] | None) -> list[str]:
+        allowed = {"chat", "responses", "legacy"}
+        result = [str(x).strip() for x in (values or []) if str(x).strip() in allowed]
+        return list(dict.fromkeys(result)) or DEFAULT_PROTOCOLS.copy()
+
     def _row(self, row: sqlite3.Row, include_secret: bool = False) -> dict[str, Any]:
         data = dict(row)
         data["enabled"] = bool(data["enabled"])
         data["auto_test_enabled"] = bool(data["auto_test_enabled"])
         data["backup_text_models"] = _parse(data.pop("backup_text_models_json"), [])
         data["backup_vision_models"] = _parse(data.pop("backup_vision_models_json"), [])
+        data["backup_image_models"] = _parse(data.pop("backup_image_models_json"), [])
+        data["backup_audio_models"] = _parse(data.pop("backup_audio_models_json"), [])
         data["protocol_order"] = _parse(data.pop("protocol_order_json"), DEFAULT_PROTOCOLS.copy())
         data["model_capabilities"] = _parse(data.pop("model_capabilities_json"), {})
+        data["audio_protocol"] = _normalize_audio_protocol(data.get("audio_protocol"))
+        data["audio_format"] = _normalize_audio_format(data.get("audio_format"))
         cipher = data.pop("api_key_cipher")
         plain = self.decrypt(cipher) if cipher else ""
         data["api_key_masked"] = mask_key(plain)
@@ -186,16 +258,6 @@ class ProviderStore:
             raise KeyError(f"provider {provider_id} not found")
         return self._row(row, include_secret=include_secret)
 
-    @staticmethod
-    def _models(values: Iterable[str] | None) -> list[str]:
-        return list(dict.fromkeys(str(x).strip() for x in (values or []) if str(x).strip()))
-
-    @staticmethod
-    def _protocols(values: Iterable[str] | None) -> list[str]:
-        allowed = {"chat", "responses", "legacy"}
-        result = [str(x).strip() for x in (values or []) if str(x).strip() in allowed]
-        return list(dict.fromkeys(result)) or DEFAULT_PROTOCOLS.copy()
-
     def create_provider(
         self,
         *,
@@ -208,6 +270,13 @@ class ProviderStore:
         backup_text_models: Iterable[str] | None = None,
         main_vision_model: str = "",
         backup_vision_models: Iterable[str] | None = None,
+        main_image_model: str = "",
+        backup_image_models: Iterable[str] | None = None,
+        main_audio_model: str = "",
+        backup_audio_models: Iterable[str] | None = None,
+        audio_protocol: str = "auto",
+        audio_voice: str = "alloy",
+        audio_format: str = "wav",
         protocol_order: Iterable[str] | None = None,
         timeout_seconds: int = 60,
         auto_test_enabled: bool = False,
@@ -218,26 +287,28 @@ class ProviderStore:
         base = normalize_base_url(base_url)
         if not name.strip() or not base.startswith(("http://", "https://")):
             raise ValueError("供应商名称或 BaseUrl 无效")
+        columns = [
+            "name", "base_url", "api_key_cipher", "enabled", "priority",
+            "main_text_model", "backup_text_models_json", "main_vision_model", "backup_vision_models_json",
+            "main_image_model", "backup_image_models_json", "main_audio_model", "backup_audio_models_json",
+            "audio_protocol", "audio_voice", "audio_format", "protocol_order_json", "model_capabilities_json",
+            "timeout_seconds", "auto_test_enabled", "auto_test_interval_hours", "created_at", "updated_at",
+        ]
+        params = (
+            name.strip(), base, self.encrypt(api_key.strip()), 1 if enabled else 0, max(1, int(priority or 100)),
+            main_text_model.strip(), _json(self._models(backup_text_models)),
+            main_vision_model.strip(), _json(self._models(backup_vision_models)),
+            main_image_model.strip(), _json(self._models(backup_image_models)),
+            main_audio_model.strip(), _json(self._models(backup_audio_models)),
+            _normalize_audio_protocol(audio_protocol), (audio_voice or "alloy").strip() or "alloy",
+            _normalize_audio_format(audio_format), _json(self._protocols(protocol_order)), "{}",
+            max(5, min(600, int(timeout_seconds or 60))), 1 if auto_test_enabled else 0,
+            max(1, min(720, int(auto_test_interval_hours or 12))), now, now,
+        )
         with self.db() as conn:
             cur = conn.execute(
-                """
-                INSERT INTO providers(
-                    name, base_url, api_key_cipher, enabled, priority,
-                    main_text_model, backup_text_models_json,
-                    main_vision_model, backup_vision_models_json,
-                    protocol_order_json, model_capabilities_json,
-                    timeout_seconds, auto_test_enabled, auto_test_interval_hours,
-                    created_at, updated_at
-                ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                """,
-                (
-                    name.strip(), base, self.encrypt(api_key.strip()), 1 if enabled else 0,
-                    max(1, int(priority or 100)), main_text_model.strip(), _json(self._models(backup_text_models)),
-                    main_vision_model.strip(), _json(self._models(backup_vision_models)),
-                    _json(self._protocols(protocol_order)), "{}", max(5, min(600, int(timeout_seconds or 60))),
-                    1 if auto_test_enabled else 0, max(1, min(720, int(auto_test_interval_hours or 12))),
-                    now, now,
-                ),
+                f"INSERT INTO providers({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
+                params,
             )
             provider_id = int(cur.lastrowid)
         return self.get_provider(provider_id)
@@ -250,27 +321,31 @@ class ProviderStore:
             raise ValueError("供应商名称或 BaseUrl 无效")
         api_key = values.get("api_key", None)
         cipher = self.encrypt(str(api_key).strip()) if api_key not in (None, "") else self.encrypt(existing.get("api_key", ""))
-        backup_text = self._models(values.get("backup_text_models", existing["backup_text_models"]))
-        backup_vision = self._models(values.get("backup_vision_models", existing["backup_vision_models"]))
-        protocols = self._protocols(values.get("protocol_order", existing["protocol_order"]))
         now = utc_now()
         with self.db() as conn:
             conn.execute(
-                """
-                UPDATE providers SET
-                    name=?, base_url=?, api_key_cipher=?, enabled=?, priority=?,
-                    main_text_model=?, backup_text_models_json=?,
-                    main_vision_model=?, backup_vision_models_json=?, protocol_order_json=?,
-                    timeout_seconds=?, auto_test_enabled=?, auto_test_interval_hours=?, updated_at=?
-                WHERE id=?
-                """,
+                """UPDATE providers SET
+                    name=?,base_url=?,api_key_cipher=?,enabled=?,priority=?,
+                    main_text_model=?,backup_text_models_json=?,main_vision_model=?,backup_vision_models_json=?,
+                    main_image_model=?,backup_image_models_json=?,main_audio_model=?,backup_audio_models_json=?,
+                    audio_protocol=?,audio_voice=?,audio_format=?,protocol_order_json=?,timeout_seconds=?,
+                    auto_test_enabled=?,auto_test_interval_hours=?,updated_at=? WHERE id=?""",
                 (
-                    name, base, cipher,
-                    1 if values.get("enabled", existing["enabled"]) else 0,
+                    name, base, cipher, 1 if values.get("enabled", existing["enabled"]) else 0,
                     max(1, int(values.get("priority", existing["priority"]))),
-                    str(values.get("main_text_model", existing["main_text_model"])).strip(), _json(backup_text),
-                    str(values.get("main_vision_model", existing["main_vision_model"])).strip(), _json(backup_vision),
-                    _json(protocols), max(5, min(600, int(values.get("timeout_seconds", existing["timeout_seconds"])))),
+                    str(values.get("main_text_model", existing["main_text_model"])).strip(),
+                    _json(self._models(values.get("backup_text_models", existing["backup_text_models"]))),
+                    str(values.get("main_vision_model", existing["main_vision_model"])).strip(),
+                    _json(self._models(values.get("backup_vision_models", existing["backup_vision_models"]))),
+                    str(values.get("main_image_model", existing["main_image_model"])).strip(),
+                    _json(self._models(values.get("backup_image_models", existing["backup_image_models"]))),
+                    str(values.get("main_audio_model", existing["main_audio_model"])).strip(),
+                    _json(self._models(values.get("backup_audio_models", existing["backup_audio_models"]))),
+                    _normalize_audio_protocol(values.get("audio_protocol", existing["audio_protocol"])),
+                    str(values.get("audio_voice", existing["audio_voice"]) or "alloy").strip() or "alloy",
+                    _normalize_audio_format(values.get("audio_format", existing["audio_format"])),
+                    _json(self._protocols(values.get("protocol_order", existing["protocol_order"]))),
+                    max(5, min(600, int(values.get("timeout_seconds", existing["timeout_seconds"])))),
                     1 if values.get("auto_test_enabled", existing["auto_test_enabled"]) else 0,
                     max(1, min(720, int(values.get("auto_test_interval_hours", existing["auto_test_interval_hours"])))),
                     now, provider_id,
@@ -308,14 +383,11 @@ class ProviderStore:
         protocols = provider["protocol_order"] if protocol_order is None else self._protocols(protocol_order)
         with self.db() as conn:
             conn.execute(
-                """
-                UPDATE providers SET last_status=?, last_latency_ms=?, last_test_at=?,
-                    model_capabilities_json=?, main_text_model=?, backup_text_models_json=?,
-                    protocol_order_json=?, updated_at=? WHERE id=?
-                """,
+                """UPDATE providers SET last_status=?,last_latency_ms=?,last_test_at=?,model_capabilities_json=?,
+                    main_text_model=?,backup_text_models_json=?,protocol_order_json=?,updated_at=? WHERE id=?""",
                 (
-                    status or ("可用" if ok else "失败"), int(latency_ms), utc_now(), _json(caps),
-                    main, _json(backups), _json(protocols), utc_now(), provider_id,
+                    status or ("可用" if ok else "失败"), int(latency_ms), utc_now(), _json(caps), main,
+                    _json(backups), _json(protocols), utc_now(), provider_id,
                 ),
             )
         return self.get_provider(provider_id)
@@ -326,10 +398,9 @@ class ProviderStore:
         base_url: str,
         api_key: str,
         model: str,
-        name: str = "原 FDEX AI 接口",
+        name: str = "原 AI 接口",
         timeout_seconds: int = 60,
     ) -> dict[str, Any] | None:
-        """Create one provider only when the new store is empty."""
         if self.list_providers():
             return None
         if not (base_url.strip() and api_key.strip() and model.strip()):

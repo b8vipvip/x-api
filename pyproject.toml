@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "x-api-provider"
-version = "0.1.0"
-description = "Reusable multi-provider OpenAI-compatible AI gateway management module"
+version = "0.2.0"
+description = "Reusable multi-provider multimodal OpenAI-compatible AI capability router"
 requires-python = ">=3.10"
 dependencies = [
   "cryptography>=43,<46",
