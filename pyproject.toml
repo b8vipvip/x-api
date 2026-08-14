@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "x-api-provider"
+version = "0.1.0"
+description = "Reusable multi-provider OpenAI-compatible AI gateway management module"
+requires-python = ">=3.10"
+dependencies = [
+  "cryptography>=43,<46",
+  "httpx>=0.28,<0.29",
+  "fastapi>=0.115,<0.116",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3,<9"]
+
+[tool.setuptools.packages.find]
+include = ["x_api*"]
