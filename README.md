@@ -12,7 +12,8 @@ Reusable AI provider management and OpenAI-compatible routing module extracted a
 - Last status, latency and model capability persistence
 - Runtime provider/model fallback helpers
 - Optional FastAPI JSON admin router
-- No project-specific authentication/UI dependency in the core package
+- Optional self-contained provider web console
+- No project-specific authentication dependency in the core package
 
 ## Install
 
@@ -38,21 +39,32 @@ provider = store.create_provider(
 
 The encryption key is generated beside the database as `ai-providers.key`. Back up both files together.
 
-## FastAPI integration
+## FastAPI drop-in integration
 
 ```python
+from pathlib import Path
 from fastapi import FastAPI
-from x_api.fastapi_admin import create_provider_router
+from x_api import ProviderStore, create_console_router, create_provider_router
+
+store = ProviderStore(Path("data/ai-providers.db"))
+store.init()
 
 app = FastAPI()
 app.include_router(create_provider_router(store, require_admin=my_admin_dependency))
+app.include_router(create_console_router(store, require_admin=my_admin_dependency))
 ```
 
-The router exposes CRUD, provider testing and model discovery APIs. The host project stays responsible for authentication, CSRF and its visual console.
+Then open `/admin/ai-providers`. The JSON APIs are under `/api/admin/ai-providers` by default. Both prefixes can be changed when creating the routers.
+
+If the host application already has its own visual system (for example FDEX), use only `ProviderStore` and `create_provider_router`, or call the core functions directly and build a host-native page.
+
+## Runtime routing
+
+`complete()` tries enabled providers by priority, then main/backup model and verified protocol order. `stream_chat()` uses Chat Completions SSE as the portable streaming baseline and only switches provider before answer content starts, which prevents duplicated partial answers.
 
 ## FDEX integration
 
-FDEX vendors the same core under its server tree and adds its own Jinja admin page. This keeps the reusable provider logic independent from FDEX-specific login, audit logging and styling.
+FDEX vendors the same core ideas under its server tree and adds its own Jinja admin page, audit log, CSRF handling and systemd deep-probe scheduler. This keeps the reusable X-API package independent from FDEX-specific operations while preserving a fast copy/import path for future projects.
 
 ## Origin and scope
 
