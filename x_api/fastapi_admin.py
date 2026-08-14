@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Callable, Iterable
+from typing import Callable
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
 from .store import DEFAULT_PROTOCOLS, ProviderStore
@@ -19,6 +19,13 @@ class ProviderInput(BaseModel):
     backup_text_models: list[str] = Field(default_factory=list)
     main_vision_model: str = ""
     backup_vision_models: list[str] = Field(default_factory=list)
+    main_image_model: str = ""
+    backup_image_models: list[str] = Field(default_factory=list)
+    main_audio_model: str = ""
+    backup_audio_models: list[str] = Field(default_factory=list)
+    audio_protocol: str = Field(default="auto", pattern="^(auto|chat_audio|speech)$")
+    audio_voice: str = Field(default="alloy", min_length=1, max_length=80)
+    audio_format: str = Field(default="wav", pattern="^(mp3|opus|aac|flac|wav|pcm)$")
     protocol_order: list[str] = Field(default_factory=lambda: DEFAULT_PROTOCOLS.copy())
     timeout_seconds: int = Field(default=60, ge=5, le=600)
     auto_test_enabled: bool = False
